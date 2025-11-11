@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const socketIo = require('socket.io');
-const { db } = require('./config/firebase');
+const { db, admin } = require('./config/firebase');
 
 // Initialize Express app
 const app = express();
