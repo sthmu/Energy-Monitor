@@ -134,13 +134,25 @@ export const getLatestSensorData = async (deviceId = 'DEVICE_001') => {
   }
 };
 
-// Get sensor history for a device (replaces getDailyEnergyData)
-export const getSensorHistory = async (deviceId = 'DEVICE_001', hours = 24) => {
-  console.log(`📊 Fetching sensor history for device: ${deviceId}, hours: ${hours}`);
+// Get sensor history for a device with flexible time filters
+export const getSensorHistory = async (deviceId = 'DEVICE_001', hours = null, days = null, weeks = null, months = null) => {
+  console.log(`📊 Fetching sensor history for device: ${deviceId}`);
+  
+  const params = {};
+  if (hours) params.hours = hours;
+  if (days) params.days = days;
+  if (weeks) params.weeks = weeks;
+  if (months) params.months = months;
+  
+  // Default to 24 hours if no filter specified
+  if (!hours && !days && !weeks && !months) {
+    params.hours = 24;
+  }
+  
+  console.log('📊 Query parameters:', params);
+  
   try {
-    const response = await axios.get(`/api/sensor/history/${deviceId}`, {
-      params: { hours }
-    });
+    const response = await axios.get(`/api/sensor/history/${deviceId}`, { params });
     console.log('✅ Sensor history received:', {
       recordCount: response.data?.data?.length || 0,
       data: response.data
