@@ -141,34 +141,54 @@ app.post('/api/sensor/data', async (req, res) => {
 app.get('/api/sensor/latest/:deviceId', async (req, res) => {
   try {
     const { deviceId } = req.params;
+    
+    console.log('📊 Latest data request for device:', deviceId);
 
     const snapshot = await db.collection('sensorData')
       .where('deviceId', '==', deviceId)
       .orderBy('timestamp', 'desc')
-      .limit(3)
+      .limit(1)
       .get();
 
     if (snapshot.empty) {
+      console.log('⚠️ No data found for device:', deviceId);
       return res.status(404).json({ 
         success: false,
-        message: 'No data found for device' 
+        message: `No data found for device ${deviceId}. The device may not be connected or no data has been recorded yet.`,
+        deviceId,
+        connected: false,
+        suggestion: 'To test with dummy data, run: node scripts/addDummyData.js'
       });
     }
 
-    const data = snapshot.docs.map(doc => ({
+    const doc = snapshot.docs[0];
+    const data = {
       id: doc.id,
       ...doc.data(),
       timestamp: doc.data().timestamp?.toDate()
-    }));
+    };
+
+    // Check if data is recent (within last 5 minutes = device is "connected")
+    const fiveMinutesAgo = new Date();
+    fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
+    const isRecent = data.timestamp >= fiveMinutesAgo;
+
+    console.log('✅ Latest data found:', { 
+      deviceId, 
+      timestamp: data.timestamp,
+      connected: isRecent 
+    });
 
     res.status(200).json({ 
       success: true,
       deviceId,
+      connected: isRecent,
+      lastSeen: data.timestamp,
       data
     });
 
   } catch (error) {
-    console.error('Get latest data error:', error);
+    console.error('❌ Get latest data error:', error);
     res.status(500).json({ 
       success: false,
       message: 'Server error',
@@ -181,21 +201,62 @@ app.get('/api/sensor/latest/:deviceId', async (req, res) => {
 app.get('/api/sensor/history/:deviceId', async (req, res) => {
   try {
     const { deviceId } = req.params;
-    const { hours = 24, phase } = req.query;
+    const { 
+      hours, 
+      days, 
+      weeks, 
+      months,
+      startDate,
+      endDate,
+      limit = 1000 
+    } = req.query;
 
-    const hoursAgo = new Date();
-    hoursAgo.setHours(hoursAgo.getHours() - parseInt(hours));
+    console.log('📊 History request:', { deviceId, hours, days, weeks, months, startDate, endDate });
+
+    // Calculate time range based on query parameters
+    let timeStart = new Date();
+    
+    if (startDate) {
+      // Custom date range
+      timeStart = new Date(startDate);
+    } else if (months) {
+      timeStart.setMonth(timeStart.getMonth() - parseInt(months));
+    } else if (weeks) {
+      timeStart.setDate(timeStart.getDate() - (parseInt(weeks) * 7));
+    } else if (days) {
+      timeStart.setDate(timeStart.getDate() - parseInt(days));
+    } else if (hours) {
+      timeStart.setHours(timeStart.getHours() - parseInt(hours));
+    } else {
+      // Default to 24 hours
+      timeStart.setHours(timeStart.getHours() - 24);
+    }
+
+    const timeEnd = endDate ? new Date(endDate) : new Date();
+
+    console.log('📅 Time range:', { 
+      start: timeStart.toISOString(), 
+      end: timeEnd.toISOString() 
+    });
 
     let query = db.collection('sensorData')
       .where('deviceId', '==', deviceId)
-      .where('timestamp', '>=', hoursAgo)
+      .where('timestamp', '>=', timeStart)
+      .where('timestamp', '<=', timeEnd)
       .orderBy('timestamp', 'desc');
 
-    if (phase) {
-      query = query.where('phase', '==', parseInt(phase));
-    }
+    const snapshot = await query.limit(parseInt(limit)).get();
 
-    const snapshot = await query.limit(1000).get();
+    if (snapshot.empty) {
+      console.log('⚠️ No data found for device:', deviceId);
+      return res.status(404).json({ 
+        success: false,
+        message: `No data found for device ${deviceId}. The device may not be connected or no data has been recorded yet.`,
+        count: 0,
+        data: [],
+        suggestion: 'Run the dummy data script: node scripts/addDummyData.js'
+      });
+    }
 
     const data = snapshot.docs.map(doc => ({
       id: doc.id,
@@ -203,14 +264,20 @@ app.get('/api/sensor/history/:deviceId', async (req, res) => {
       timestamp: doc.data().timestamp?.toDate()
     }));
 
+    console.log('✅ Found', data.length, 'records');
+
     res.status(200).json({ 
       success: true,
       count: data.length,
+      timeRange: {
+        start: timeStart,
+        end: timeEnd
+      },
       data
     });
 
   } catch (error) {
-    console.error('Get history error:', error);
+    console.error('❌ Get history error:', error);
     res.status(500).json({ 
       success: false,
       message: 'Server error',
@@ -224,35 +291,75 @@ app.get('/api/sensor/phases/:deviceId', async (req, res) => {
   try {
     const { deviceId } = req.params;
     
-    // Get latest reading for each phase
-    const phases = [];
+    console.log('📊 Phase comparison request for device:', deviceId);
     
-    for (let phase = 1; phase <= 3; phase++) {
-      const snapshot = await db.collection('sensorData')
-        .where('deviceId', '==', deviceId)
-        .where('phase', '==', phase)
-        .orderBy('timestamp', 'desc')
-        .limit(1)
-        .get();
-      
-      if (!snapshot.empty) {
-        const doc = snapshot.docs[0];
-        phases.push({
-          phase,
-          current: doc.data().current,
-          timestamp: doc.data().timestamp?.toDate()
-        });
-      }
+    // Get latest reading with all phases
+    const snapshot = await db.collection('sensorData')
+      .where('deviceId', '==', deviceId)
+      .orderBy('timestamp', 'desc')
+      .limit(1)
+      .get();
+    
+    if (snapshot.empty) {
+      console.log('⚠️ No phase data found for device:', deviceId);
+      return res.status(404).json({ 
+        success: false,
+        message: `No phase data found for device ${deviceId}. The device may not be connected or no data has been recorded yet.`,
+        deviceId,
+        connected: false,
+        phases: [],
+        suggestion: 'To test with dummy data, run: node scripts/addDummyData.js'
+      });
     }
+
+    const doc = snapshot.docs[0];
+    const data = doc.data();
+    
+    const phases = [
+      {
+        phase: 1,
+        voltage: data.phase1?.voltage || 0,
+        current: data.phase1?.current || 0,
+        power: data.phase1?.power || 0
+      },
+      {
+        phase: 2,
+        voltage: data.phase2?.voltage || 0,
+        current: data.phase2?.current || 0,
+        power: data.phase2?.power || 0
+      },
+      {
+        phase: 3,
+        voltage: data.phase3?.voltage || 0,
+        current: data.phase3?.current || 0,
+        power: data.phase3?.power || 0
+      }
+    ];
+
+    // Check if data is recent (within last 5 minutes)
+    const fiveMinutesAgo = new Date();
+    fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
+    const timestamp = data.timestamp?.toDate();
+    const isRecent = timestamp >= fiveMinutesAgo;
+
+    console.log('✅ Phase data found:', { 
+      deviceId, 
+      phases: phases.length,
+      connected: isRecent 
+    });
 
     res.status(200).json({ 
       success: true,
       deviceId,
+      connected: isRecent,
+      lastSeen: timestamp,
+      totalPower: data.totalPower || 0,
+      frequency: data.frequency || 0,
       phases
     });
 
   } catch (error) {
-    console.error('Get phases error:', error);
+    console.error('❌ Get phases error:', error);
     res.status(500).json({ 
       success: false,
       message: 'Server error',
