@@ -19,7 +19,7 @@ backend/*firebase*.json
 backend/config/firebase-credentials.json
 
 # Build outputs
-frontend/build/
+
 frontend/dist/
 backend/build/
 backend/dist/

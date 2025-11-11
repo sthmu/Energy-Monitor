@@ -58,77 +58,336 @@ app.get('/api/health', async (req, res) => {
 });
 
 // Arduino endpoint - receives current data
+// POST endpoint for GSM/Arduino to send sensor data
 app.post('/api/sensor/data', async (req, res) => {
   try {
-    const io = req.app.get('io');
-    const { deviceId, data } = req.body;
+    console.log('📡 Incoming sensor data:', JSON.stringify(req.body, null, 2));
     
-    // Validate input
-    if (!deviceId || data === undefined || data === null) {
+    const io = req.app.get('io');
+    const { 
+      deviceId, 
+      phase1, 
+      phase2, 
+      phase3, 
+      totalPower, 
+      frequency 
+    } = req.body;
+    
+    // Validate required fields
+    if (!deviceId) {
+      console.log('❌ Missing deviceId');
       return res.status(400).json({ 
         success: false,
-        message: 'deviceId and data are required' 
+        message: 'deviceId is required',
+        example: {
+          deviceId: "DEVICE_001",
+          phase1: { voltage: 230, current: 20, power: 4600 },
+          phase2: { voltage: 230, current: 20, power: 4600 },
+          phase3: { voltage: 230, current: 20, power: 4600 },
+          totalPower: 13800,
+          frequency: 50.0
+        }
       });
     }
 
-    // Parse current value
-    const current = parseFloat(data);
-    if (isNaN(current)) {
+    // Validate phase data structure
+    const validatePhase = (phase, phaseNum) => {
+      if (!phase || typeof phase !== 'object') {
+        throw new Error(`phase${phaseNum} must be an object with voltage, current, and power`);
+      }
+      if (phase.voltage === undefined || phase.current === undefined || phase.power === undefined) {
+        throw new Error(`phase${phaseNum} must include voltage, current, and power`);
+      }
+      if (isNaN(phase.voltage) || isNaN(phase.current) || isNaN(phase.power)) {
+        throw new Error(`phase${phaseNum} values must be valid numbers`);
+      }
+    };
+
+    try {
+      validatePhase(phase1, 1);
+      validatePhase(phase2, 2);
+      validatePhase(phase3, 3);
+    } catch (validationError) {
+      console.log('❌ Validation error:', validationError.message);
       return res.status(400).json({ 
         success: false,
-        message: 'data must be a valid number' 
+        message: validationError.message,
+        example: {
+          deviceId: "DEVICE_001",
+          phase1: { voltage: 230, current: 20, power: 4600 },
+          phase2: { voltage: 230, current: 20, power: 4600 },
+          phase3: { voltage: 230, current: 20, power: 4600 },
+          totalPower: 13800,
+          frequency: 50.0
+        }
       });
     }
 
     const timestamp = new Date();
     
-    // Store data for all 3 phases in Firestore
-    const batch = db.batch();
+    // Calculate total power if not provided
+    const calculatedTotalPower = totalPower || 
+      (parseFloat(phase1.power) + parseFloat(phase2.power) + parseFloat(phase3.power));
     
-    for (let phase = 1; phase <= 3; phase++) {
-      const docRef = db.collection('sensorData').doc();
-      batch.set(docRef, {
-        deviceId,
-        timestamp,
-        phase,
-        current,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-    }
-    
-    await batch.commit();
+    // Store data in Firestore
+    const docRef = db.collection('sensorData').doc();
+    await docRef.set({
+      deviceId,
+      timestamp,
+      phase1: {
+        voltage: parseFloat(phase1.voltage),
+        current: parseFloat(phase1.current),
+        power: parseFloat(phase1.power)
+      },
+      phase2: {
+        voltage: parseFloat(phase2.voltage),
+        current: parseFloat(phase2.current),
+        power: parseFloat(phase2.power)
+      },
+      phase3: {
+        voltage: parseFloat(phase3.voltage),
+        current: parseFloat(phase3.current),
+        power: parseFloat(phase3.power)
+      },
+      totalPower: calculatedTotalPower,
+      frequency: frequency ? parseFloat(frequency) : 50.0,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
 
     // Update device info
     await db.collection('devices').doc(deviceId).set({
       deviceId,
       lastSeenAt: timestamp,
-      lastCurrent: current,
-      isActive: true
+      isActive: true,
+      lastData: {
+        totalPower: calculatedTotalPower,
+        frequency: frequency || 50.0
+      }
     }, { merge: true });
 
-    // Emit real-time update
+    // Emit real-time update via WebSocket
     io.emit('sensor-update', {
       deviceId,
       timestamp,
-      current,
-      phases: [
-        { phase: 1, current },
-        { phase: 2, current },
-        { phase: 3, current }
-      ]
+      phase1,
+      phase2,
+      phase3,
+      totalPower: calculatedTotalPower,
+      frequency: frequency || 50.0
     });
+
+    console.log('✅ Data saved successfully:', deviceId, 'Total Power:', calculatedTotalPower, 'W');
 
     // Success response
     res.status(201).json({ 
       success: true,
-      message: 'Data received successfully',
+      message: 'Data received and stored successfully',
       timestamp,
       deviceId,
-      current
+      totalPower: calculatedTotalPower,
+      documentId: docRef.id
     });
 
   } catch (error) {
-    console.error('Sensor data error:', error);
+    console.error('❌ Sensor data error:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+});
+
+// POST endpoint for sending CURRENT data only
+app.post('/api/sensor/current', async (req, res) => {
+  try {
+    console.log('⚡ Incoming current data:', JSON.stringify(req.body, null, 2));
+    
+    const io = req.app.get('io');
+    const { deviceId, phase1, phase2, phase3 } = req.body;
+    
+    // Validate required fields
+    if (!deviceId) {
+      console.log('❌ Missing deviceId');
+      return res.status(400).json({ 
+        success: false,
+        message: 'deviceId is required',
+        example: {
+          deviceId: "DEVICE_001",
+          phase1: 20.5,
+          phase2: 19.8,
+          phase3: 21.2
+        }
+      });
+    }
+
+    // Validate current values
+    if (phase1 === undefined || phase2 === undefined || phase3 === undefined) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'phase1, phase2, and phase3 current values are required',
+        example: {
+          deviceId: "DEVICE_001",
+          phase1: 20.5,
+          phase2: 19.8,
+          phase3: 21.2
+        }
+      });
+    }
+
+    const timestamp = new Date();
+    
+    // Store current data
+    const docRef = db.collection('currentReadings').doc();
+    await docRef.set({
+      deviceId,
+      timestamp,
+      phase1: parseFloat(phase1),
+      phase2: parseFloat(phase2),
+      phase3: parseFloat(phase3),
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // Update device info
+    await db.collection('devices').doc(deviceId).set({
+      deviceId,
+      lastSeenAt: timestamp,
+      isActive: true,
+      lastCurrents: {
+        phase1: parseFloat(phase1),
+        phase2: parseFloat(phase2),
+        phase3: parseFloat(phase3)
+      }
+    }, { merge: true });
+
+    // Emit real-time update
+    io.emit('current-update', {
+      deviceId,
+      timestamp,
+      phase1: parseFloat(phase1),
+      phase2: parseFloat(phase2),
+      phase3: parseFloat(phase3)
+    });
+
+    console.log('✅ Current data saved:', deviceId, 'Phase1:', phase1, 'A');
+
+    res.status(201).json({ 
+      success: true,
+      message: 'Current data received and stored successfully',
+      timestamp,
+      deviceId,
+      currents: {
+        phase1: parseFloat(phase1),
+        phase2: parseFloat(phase2),
+        phase3: parseFloat(phase3)
+      },
+      documentId: docRef.id
+    });
+
+  } catch (error) {
+    console.error('❌ Current data error:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+});
+
+// POST endpoint for sending VOLTAGE data only
+app.post('/api/sensor/voltage', async (req, res) => {
+  try {
+    console.log('⚡ Incoming voltage data:', JSON.stringify(req.body, null, 2));
+    
+    const io = req.app.get('io');
+    const { deviceId, phase1, phase2, phase3, frequency } = req.body;
+    
+    // Validate required fields
+    if (!deviceId) {
+      console.log('❌ Missing deviceId');
+      return res.status(400).json({ 
+        success: false,
+        message: 'deviceId is required',
+        example: {
+          deviceId: "DEVICE_001",
+          phase1: 230.5,
+          phase2: 229.8,
+          phase3: 231.2,
+          frequency: 50.0
+        }
+      });
+    }
+
+    // Validate voltage values
+    if (phase1 === undefined || phase2 === undefined || phase3 === undefined) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'phase1, phase2, and phase3 voltage values are required',
+        example: {
+          deviceId: "DEVICE_001",
+          phase1: 230.5,
+          phase2: 229.8,
+          phase3: 231.2,
+          frequency: 50.0
+        }
+      });
+    }
+
+    const timestamp = new Date();
+    
+    // Store voltage data
+    const docRef = db.collection('voltageReadings').doc();
+    await docRef.set({
+      deviceId,
+      timestamp,
+      phase1: parseFloat(phase1),
+      phase2: parseFloat(phase2),
+      phase3: parseFloat(phase3),
+      frequency: frequency ? parseFloat(frequency) : 50.0,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // Update device info
+    await db.collection('devices').doc(deviceId).set({
+      deviceId,
+      lastSeenAt: timestamp,
+      isActive: true,
+      lastVoltages: {
+        phase1: parseFloat(phase1),
+        phase2: parseFloat(phase2),
+        phase3: parseFloat(phase3)
+      },
+      frequency: frequency ? parseFloat(frequency) : 50.0
+    }, { merge: true });
+
+    // Emit real-time update
+    io.emit('voltage-update', {
+      deviceId,
+      timestamp,
+      phase1: parseFloat(phase1),
+      phase2: parseFloat(phase2),
+      phase3: parseFloat(phase3),
+      frequency: frequency ? parseFloat(frequency) : 50.0
+    });
+
+    console.log('✅ Voltage data saved:', deviceId, 'Phase1:', phase1, 'V');
+
+    res.status(201).json({ 
+      success: true,
+      message: 'Voltage data received and stored successfully',
+      timestamp,
+      deviceId,
+      voltages: {
+        phase1: parseFloat(phase1),
+        phase2: parseFloat(phase2),
+        phase3: parseFloat(phase3)
+      },
+      frequency: frequency ? parseFloat(frequency) : 50.0,
+      documentId: docRef.id
+    });
+
+  } catch (error) {
+    console.error('❌ Voltage data error:', error);
     res.status(500).json({ 
       success: false,
       message: 'Server error',
