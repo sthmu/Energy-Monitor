@@ -3,14 +3,14 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const socketIo = require('socket.io');
-const { db, statements, helpers } = require('./config/database');
+const { db, admin } = require('./config/firebase');
 
 // Initialize Express app
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || '*',
+    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
     methods: ['GET', 'POST']
   }
 });
@@ -33,16 +33,18 @@ io.on('connection', (socket) => {
 });
 
 // Health check endpoint
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
   try {
-    // Test database with a simple query
-    const result = db.prepare('SELECT 1 as test').get();
+    // Test Firestore connection
+    await db.collection('_health').doc('test').set({ 
+      timestamp: new Date(),
+      status: 'healthy' 
+    });
     
     res.status(200).json({ 
       status: 'healthy',
       timestamp: new Date(),
       database: 'connected',
-      dbType: 'SQLite',
       service: 'Energy Monitoring API'
     });
   } catch (error) {
@@ -55,8 +57,9 @@ app.get('/api/health', (req, res) => {
   }
 });
 
-// POST endpoint for GSM/Arduino to send complete sensor data
-app.post('/api/sensor/data', (req, res) => {
+// Arduino endpoint - receives current data
+// POST endpoint for GSM/Arduino to send sensor data
+app.post('/api/sensor/data', async (req, res) => {
   try {
     console.log('📡 Incoming sensor data:', JSON.stringify(req.body, null, 2));
     
@@ -120,37 +123,52 @@ app.post('/api/sensor/data', (req, res) => {
       });
     }
 
-    const timestamp = Date.now();
-    const timestampUnix = helpers.toUnixTimestamp(new Date(timestamp));
+    const timestamp = new Date();
     
     // Calculate total power if not provided
     const calculatedTotalPower = totalPower || 
       (parseFloat(phase1.power) + parseFloat(phase2.power) + parseFloat(phase3.power));
     
-    // Insert data into database
-    const info = statements.insertSensorData.run(
+    // Store data in Firestore
+    const docRef = db.collection('sensorData').doc();
+    await docRef.set({
       deviceId,
-      timestampUnix,
-      parseFloat(phase1.voltage),
-      parseFloat(phase1.current),
-      parseFloat(phase1.power),
-      parseFloat(phase2.voltage),
-      parseFloat(phase2.current),
-      parseFloat(phase2.power),
-      parseFloat(phase3.voltage),
-      parseFloat(phase3.current),
-      parseFloat(phase3.power),
-      calculatedTotalPower,
-      frequency ? parseFloat(frequency) : 50.0
-    );
+      timestamp,
+      phase1: {
+        voltage: parseFloat(phase1.voltage),
+        current: parseFloat(phase1.current),
+        power: parseFloat(phase1.power)
+      },
+      phase2: {
+        voltage: parseFloat(phase2.voltage),
+        current: parseFloat(phase2.current),
+        power: parseFloat(phase2.power)
+      },
+      phase3: {
+        voltage: parseFloat(phase3.voltage),
+        current: parseFloat(phase3.current),
+        power: parseFloat(phase3.power)
+      },
+      totalPower: calculatedTotalPower,
+      frequency: frequency ? parseFloat(frequency) : 50.0,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
 
-    // Update device status
-    statements.updateDevice.run(deviceId, timestampUnix);
+    // Update device info
+    await db.collection('devices').doc(deviceId).set({
+      deviceId,
+      lastSeenAt: timestamp,
+      isActive: true,
+      lastData: {
+        totalPower: calculatedTotalPower,
+        frequency: frequency || 50.0
+      }
+    }, { merge: true });
 
     // Emit real-time update via WebSocket
     io.emit('sensor-update', {
       deviceId,
-      timestamp: new Date(timestamp),
+      timestamp,
       phase1,
       phase2,
       phase3,
@@ -164,10 +182,10 @@ app.post('/api/sensor/data', (req, res) => {
     res.status(201).json({ 
       success: true,
       message: 'Data received and stored successfully',
-      timestamp: new Date(timestamp),
+      timestamp,
       deviceId,
       totalPower: calculatedTotalPower,
-      recordId: info.lastInsertRowid
+      documentId: docRef.id
     });
 
   } catch (error) {
@@ -181,7 +199,7 @@ app.post('/api/sensor/data', (req, res) => {
 });
 
 // POST endpoint for sending CURRENT data only
-app.post('/api/sensor/current', (req, res) => {
+app.post('/api/sensor/current', async (req, res) => {
   try {
     console.log('⚡ Incoming current data:', JSON.stringify(req.body, null, 2));
     
@@ -217,25 +235,35 @@ app.post('/api/sensor/current', (req, res) => {
       });
     }
 
-    const timestamp = Date.now();
-    const timestampUnix = helpers.toUnixTimestamp(new Date(timestamp));
+    const timestamp = new Date();
     
     // Store current data
-    const info = statements.insertCurrentReading.run(
+    const docRef = db.collection('currentReadings').doc();
+    await docRef.set({
       deviceId,
-      timestampUnix,
-      parseFloat(phase1),
-      parseFloat(phase2),
-      parseFloat(phase3)
-    );
+      timestamp,
+      phase1: parseFloat(phase1),
+      phase2: parseFloat(phase2),
+      phase3: parseFloat(phase3),
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
 
-    // Update device status
-    statements.updateDevice.run(deviceId, timestampUnix);
+    // Update device info
+    await db.collection('devices').doc(deviceId).set({
+      deviceId,
+      lastSeenAt: timestamp,
+      isActive: true,
+      lastCurrents: {
+        phase1: parseFloat(phase1),
+        phase2: parseFloat(phase2),
+        phase3: parseFloat(phase3)
+      }
+    }, { merge: true });
 
     // Emit real-time update
     io.emit('current-update', {
       deviceId,
-      timestamp: new Date(timestamp),
+      timestamp,
       phase1: parseFloat(phase1),
       phase2: parseFloat(phase2),
       phase3: parseFloat(phase3)
@@ -246,14 +274,14 @@ app.post('/api/sensor/current', (req, res) => {
     res.status(201).json({ 
       success: true,
       message: 'Current data received and stored successfully',
-      timestamp: new Date(timestamp),
+      timestamp,
       deviceId,
       currents: {
         phase1: parseFloat(phase1),
         phase2: parseFloat(phase2),
         phase3: parseFloat(phase3)
       },
-      recordId: info.lastInsertRowid
+      documentId: docRef.id
     });
 
   } catch (error) {
@@ -267,7 +295,7 @@ app.post('/api/sensor/current', (req, res) => {
 });
 
 // POST endpoint for sending VOLTAGE data only
-app.post('/api/sensor/voltage', (req, res) => {
+app.post('/api/sensor/voltage', async (req, res) => {
   try {
     console.log('⚡ Incoming voltage data:', JSON.stringify(req.body, null, 2));
     
@@ -305,26 +333,37 @@ app.post('/api/sensor/voltage', (req, res) => {
       });
     }
 
-    const timestamp = Date.now();
-    const timestampUnix = helpers.toUnixTimestamp(new Date(timestamp));
+    const timestamp = new Date();
     
     // Store voltage data
-    const info = statements.insertVoltageReading.run(
+    const docRef = db.collection('voltageReadings').doc();
+    await docRef.set({
       deviceId,
-      timestampUnix,
-      parseFloat(phase1),
-      parseFloat(phase2),
-      parseFloat(phase3),
-      frequency ? parseFloat(frequency) : 50.0
-    );
+      timestamp,
+      phase1: parseFloat(phase1),
+      phase2: parseFloat(phase2),
+      phase3: parseFloat(phase3),
+      frequency: frequency ? parseFloat(frequency) : 50.0,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
 
-    // Update device status
-    statements.updateDevice.run(deviceId, timestampUnix);
+    // Update device info
+    await db.collection('devices').doc(deviceId).set({
+      deviceId,
+      lastSeenAt: timestamp,
+      isActive: true,
+      lastVoltages: {
+        phase1: parseFloat(phase1),
+        phase2: parseFloat(phase2),
+        phase3: parseFloat(phase3)
+      },
+      frequency: frequency ? parseFloat(frequency) : 50.0
+    }, { merge: true });
 
     // Emit real-time update
     io.emit('voltage-update', {
       deviceId,
-      timestamp: new Date(timestamp),
+      timestamp,
       phase1: parseFloat(phase1),
       phase2: parseFloat(phase2),
       phase3: parseFloat(phase3),
@@ -336,7 +375,7 @@ app.post('/api/sensor/voltage', (req, res) => {
     res.status(201).json({ 
       success: true,
       message: 'Voltage data received and stored successfully',
-      timestamp: new Date(timestamp),
+      timestamp,
       deviceId,
       voltages: {
         phase1: parseFloat(phase1),
@@ -344,7 +383,7 @@ app.post('/api/sensor/voltage', (req, res) => {
         phase3: parseFloat(phase3)
       },
       frequency: frequency ? parseFloat(frequency) : 50.0,
-      recordId: info.lastInsertRowid
+      documentId: docRef.id
     });
 
   } catch (error) {
@@ -358,25 +397,35 @@ app.post('/api/sensor/voltage', (req, res) => {
 });
 
 // Get latest sensor data
-app.get('/api/sensor/latest/:deviceId', (req, res) => {
+app.get('/api/sensor/latest/:deviceId', async (req, res) => {
   try {
     const { deviceId } = req.params;
     
     console.log('📊 Latest data request for device:', deviceId);
 
-    const row = statements.getLatestData.get(deviceId);
+    const snapshot = await db.collection('sensorData')
+      .where('deviceId', '==', deviceId)
+      .orderBy('timestamp', 'desc')
+      .limit(1)
+      .get();
 
-    if (!row) {
+    if (snapshot.empty) {
       console.log('⚠️ No data found for device:', deviceId);
       return res.status(404).json({ 
         success: false,
         message: `No data found for device ${deviceId}. The device may not be connected or no data has been recorded yet.`,
         deviceId,
-        connected: false
+        connected: false,
+        suggestion: 'To test with dummy data, run: node scripts/addDummyData.js'
       });
     }
 
-    const data = helpers.rowToApiFormat(row);
+    const doc = snapshot.docs[0];
+    const data = {
+      id: doc.id,
+      ...doc.data(),
+      timestamp: doc.data().timestamp?.toDate()
+    };
 
     // Check if data is recent (within last 5 minutes = device is "connected")
     const fiveMinutesAgo = new Date();
@@ -408,7 +457,7 @@ app.get('/api/sensor/latest/:deviceId', (req, res) => {
 });
 
 // Get historical data
-app.get('/api/sensor/history/:deviceId', (req, res) => {
+app.get('/api/sensor/history/:deviceId', async (req, res) => {
   try {
     const { deviceId } = req.params;
     const { 
@@ -427,6 +476,7 @@ app.get('/api/sensor/history/:deviceId', (req, res) => {
     let timeStart = new Date();
     
     if (startDate) {
+      // Custom date range
       timeStart = new Date(startDate);
     } else if (months) {
       timeStart.setMonth(timeStart.getMonth() - parseInt(months));
@@ -437,6 +487,7 @@ app.get('/api/sensor/history/:deviceId', (req, res) => {
     } else if (hours) {
       timeStart.setHours(timeStart.getHours() - parseInt(hours));
     } else {
+      // Default to 24 hours
       timeStart.setHours(timeStart.getHours() - 24);
     }
 
@@ -447,27 +498,30 @@ app.get('/api/sensor/history/:deviceId', (req, res) => {
       end: timeEnd.toISOString() 
     });
 
-    const timeStartUnix = helpers.toUnixTimestamp(timeStart);
-    const timeEndUnix = helpers.toUnixTimestamp(timeEnd);
+    let query = db.collection('sensorData')
+      .where('deviceId', '==', deviceId)
+      .where('timestamp', '>=', timeStart)
+      .where('timestamp', '<=', timeEnd)
+      .orderBy('timestamp', 'desc');
 
-    const rows = statements.getHistoricalData.all(
-      deviceId, 
-      timeStartUnix, 
-      timeEndUnix, 
-      parseInt(limit)
-    );
+    const snapshot = await query.limit(parseInt(limit)).get();
 
-    if (rows.length === 0) {
+    if (snapshot.empty) {
       console.log('⚠️ No data found for device:', deviceId);
       return res.status(404).json({ 
         success: false,
-        message: `No data found for device ${deviceId} in the specified time range.`,
+        message: `No data found for device ${deviceId}. The device may not be connected or no data has been recorded yet.`,
         count: 0,
-        data: []
+        data: [],
+        suggestion: 'Run the dummy data script: node scripts/addDummyData.js'
       });
     }
 
-    const data = rows.map(row => helpers.rowToApiFormat(row));
+    const data = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      timestamp: doc.data().timestamp?.toDate()
+    }));
 
     console.log('✅ Found', data.length, 'records');
 
@@ -492,35 +546,64 @@ app.get('/api/sensor/history/:deviceId', (req, res) => {
 });
 
 // Get all phases current reading
-app.get('/api/sensor/phases/:deviceId', (req, res) => {
+app.get('/api/sensor/phases/:deviceId', async (req, res) => {
   try {
     const { deviceId } = req.params;
     
     console.log('📊 Phase comparison request for device:', deviceId);
     
-    const row = statements.getLatestData.get(deviceId);
+    // Get latest reading with all phases
+    const snapshot = await db.collection('sensorData')
+      .where('deviceId', '==', deviceId)
+      .orderBy('timestamp', 'desc')
+      .limit(1)
+      .get();
     
-    if (!row) {
+    if (snapshot.empty) {
       console.log('⚠️ No phase data found for device:', deviceId);
       return res.status(404).json({ 
         success: false,
         message: `No phase data found for device ${deviceId}. The device may not be connected or no data has been recorded yet.`,
         deviceId,
         connected: false,
-        phases: []
+        phases: [],
+        suggestion: 'To test with dummy data, run: node scripts/addDummyData.js'
       });
     }
 
-    const data = helpers.rowToApiFormat(row);
+    const doc = snapshot.docs[0];
+    const data = doc.data();
     
+    const phases = [
+      {
+        phase: 1,
+        voltage: data.phase1?.voltage || 0,
+        current: data.phase1?.current || 0,
+        power: data.phase1?.power || 0
+      },
+      {
+        phase: 2,
+        voltage: data.phase2?.voltage || 0,
+        current: data.phase2?.current || 0,
+        power: data.phase2?.power || 0
+      },
+      {
+        phase: 3,
+        voltage: data.phase3?.voltage || 0,
+        current: data.phase3?.current || 0,
+        power: data.phase3?.power || 0
+      }
+    ];
+
     // Check if data is recent (within last 5 minutes)
     const fiveMinutesAgo = new Date();
     fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
-    const isRecent = data.timestamp >= fiveMinutesAgo;
+    const timestamp = data.timestamp?.toDate();
+    const isRecent = timestamp >= fiveMinutesAgo;
 
     console.log('✅ Phase data found:', { 
       deviceId, 
-      phases: 3,
+      phases: phases.length,
       connected: isRecent 
     });
 
@@ -528,10 +611,10 @@ app.get('/api/sensor/phases/:deviceId', (req, res) => {
       success: true,
       deviceId,
       connected: isRecent,
-      lastSeen: data.timestamp,
-      totalPower: data.totalPower,
-      frequency: data.frequency,
-      phases: data
+      lastSeen: timestamp,
+      totalPower: data.totalPower || 0,
+      frequency: data.frequency || 0,
+      phases
     });
 
   } catch (error) {
@@ -548,23 +631,12 @@ app.get('/api/sensor/phases/:deviceId', (req, res) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log('💾 Database: SQLite (local file)');
-  console.log('📁 Database location: backend/data/energy-monitor.db');
+  console.log('📊 Firebase Firestore connected');
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('SIGTERM received, closing server...');
-  db.close();
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, closing server...');
-  db.close();
   server.close(() => {
     console.log('Server closed');
     process.exit(0);

@@ -64,3 +64,92 @@ coverage/
 *.backup
 *.bak
 *.old
+
+# ============================================
+# BACKEND - Unnecessary for Production
+# ============================================
+
+# Old Firebase files
+backend/config/firebase.js
+backend/server-firebase-backup.js
+backend/*firebase*.json
+backend/energy-monitoring-system-s-firebase-adminsdk-*.json
+
+# Development scripts
+backend/scripts/addDummyData.js
+
+# Old controllers (if using new ones)
+backend/controllers/authController.js
+backend/controllers/gsmDataHandler.js
+
+# Database file (should be created on server)
+backend/data/*.db
+backend/data/*.db-*
+
+# Logs
+backend/logs/
+backend/*.log
+
+# Environment files
+backend/.env
+backend/.env.local
+
+# Node modules (never commit these!)
+backend/node_modules/
+
+# ============================================
+# FRONTEND - Unnecessary for Production
+# ============================================
+
+# Source files (only need build folder)
+# Uncomment if you only want to deploy build folder:
+# frontend/src/
+# frontend/public/
+
+# Development files
+frontend/.env.development
+frontend/.env.local
+
+# Node modules
+frontend/node_modules/
+
+# Build source maps (optional - remove for smaller size)
+frontend/build/**/*.map
+
+# ============================================
+# GENERAL
+# ============================================
+
+# Documentation (optional - keep or remove)
+*.md
+!README.md
+
+# Git files
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Production cleanup
+backend/config/firebase.js
+backend/server-firebase-backup.js
+backend/*firebase*.json
+backend/scripts/addDummyData.js
+backend/data/*.db
+backend/.env
+frontend/.env.local
